@@ -199,7 +199,7 @@ class FakeElasticsearch(Elasticsearch):
     def index(self, index, body, doc_type='_doc', id=None, params=None, headers=None):
         if index not in self.__documents_dict:
             self.__documents_dict[index] = list()
-        
+
         version = 1
 
         if id is None:
@@ -421,9 +421,9 @@ class FakeElasticsearch(Elasticsearch):
                 'params': params
             }
             hits = hits[params.get('from'):params.get('from') + params.get('size')]
-        
+
         result['hits']['hits'] = hits
-        
+
         return result
 
     @query_params('scroll')
@@ -436,17 +436,19 @@ class FakeElasticsearch(Elasticsearch):
             params=scroll.get('params')
         )
         return result
-    
+
     @query_params('consistency', 'parent', 'refresh', 'replication', 'routing',
                   'timeout', 'version', 'version_type')
-    def delete(self, index, doc_type, id, params=None, headers=None):
+    def delete(self, index, id, doc_type=None, params=None, headers=None):
 
         found = False
+        doc_type = doc_type
 
         if index in self.__documents_dict:
             for document in self.__documents_dict[index]:
-                if document.get('_type') == doc_type and document.get('_id') == id:
+                if document.get('_id') == id:
                     found = True
+                    doc_type = document.get('_type')
                     self.__documents_dict[index].remove(document)
                     break
 
