@@ -2,7 +2,7 @@
 
 import setuptools
 
-__version__ = '2.0'
+__version__ = '2.1'
 
 # read the contents of your readme file
 from os import path
