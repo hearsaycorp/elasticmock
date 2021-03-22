@@ -1,17 +1,22 @@
 # -*- coding: utf-8 -*-
-
+import datetime
 import json
 import sys
+from collections import defaultdict
 
+import dateutil.parser
 from elasticsearch import Elasticsearch
 from elasticsearch.client.utils import query_params
-from elasticsearch.exceptions import NotFoundError
+from elasticsearch.client import _normalize_hosts
+from elasticsearch.transport import Transport
+from elasticsearch.exceptions import NotFoundError, RequestError
 
 from elasticmock.behaviour.server_failure import server_failure
-from elasticmock.utilities import get_random_id, get_random_scroll_id
-from elasticmock.utilities.decorator import for_all_methods
-from elasticmock.fake_indices import FakeIndicesClient
 from elasticmock.fake_cluster import FakeClusterClient
+from elasticmock.fake_indices import FakeIndicesClient
+from elasticmock.utilities import (extract_ignore_as_iterable, get_random_id,
+    get_random_scroll_id)
+from elasticmock.utilities.decorator import for_all_methods
 
 PY3 = sys.version_info[0] == 3
 if PY3:
@@ -19,12 +24,17 @@ if PY3:
 
 
 class QueryType:
-
     BOOL = 'BOOL'
     FILTER = 'FILTER'
     MATCH = 'MATCH'
+    MATCH_ALL = 'MATCH_ALL'
     TERM = 'TERM'
     TERMS = 'TERMS'
+    MUST = 'MUST'
+    RANGE = 'RANGE'
+    SHOULD = 'SHOULD'
+    MINIMUM_SHOULD_MATCH = 'MINIMUM_SHOULD_MATCH'
+    MULTI_MATCH = 'MULTI_MATCH'
 
     @staticmethod
     def get_query_type(type_str):
@@ -34,12 +44,35 @@ class QueryType:
             return QueryType.FILTER
         elif type_str == 'match':
             return QueryType.MATCH
+        elif type_str == 'match_all':
+            return QueryType.MATCH_ALL
         elif type_str == 'term':
             return QueryType.TERM
         elif type_str == 'terms':
             return QueryType.TERMS
+        elif type_str == 'must':
+            return QueryType.MUST
+        elif type_str == 'range':
+            return QueryType.RANGE
+        elif type_str == 'should':
+            return QueryType.SHOULD
+        elif type_str == 'minimum_should_match':
+            return QueryType.MINIMUM_SHOULD_MATCH
+        elif type_str == 'multi_match':
+            return QueryType.MULTI_MATCH
         else:
             raise NotImplementedError(f'type {type_str} is not implemented for QueryType')
+
+
+class MetricType:
+    CARDINALITY = "CARDINALITY"
+
+    @staticmethod
+    def get_metric_type(type_str):
+        if type_str == "cardinality":
+            return MetricType.CARDINALITY
+        else:
+            raise NotImplementedError(f'type {type_str} is not implemented for MetricType')
 
 
 class FakeQueryCondition:
@@ -56,14 +89,24 @@ class FakeQueryCondition:
     def _evaluate_for_query_type(self, document):
         if self.type == QueryType.MATCH:
             return self._evaluate_for_match_query_type(document)
+        elif self.type == QueryType.MATCH_ALL:
+            return True
         elif self.type == QueryType.TERM:
             return self._evaluate_for_term_query_type(document)
         elif self.type == QueryType.TERMS:
             return self._evaluate_for_terms_query_type(document)
+        elif self.type == QueryType.RANGE:
+            return self._evaluate_for_range_query_type(document)
         elif self.type == QueryType.BOOL:
             return self._evaluate_for_compound_query_type(document)
         elif self.type == QueryType.FILTER:
             return self._evaluate_for_compound_query_type(document)
+        elif self.type == QueryType.MUST:
+            return self._evaluate_for_compound_query_type(document)
+        elif self.type == QueryType.SHOULD:
+            return self._evaluate_for_should_query_type(document)
+        elif self.type == QueryType.MULTI_MATCH:
+            return self._evaluate_for_multi_match_query_type(document)
         else:
             raise NotImplementedError('Fake query evaluation not implemented for query type: %s' % self.type)
 
@@ -94,6 +137,58 @@ class FakeQueryCondition:
                 break
         return return_val
 
+    def _evaluate_for_fields(self, document):
+        doc_source = document['_source']
+        return_val = False
+        value = self.condition.get('query')
+        if not value:
+            return return_val
+        fields = self.condition.get('fields', [])
+        for field in fields:
+            return_val = self._compare_value_for_field(
+                doc_source,
+                field,
+                value,
+                True
+            )
+            if return_val:
+                break
+
+        return return_val
+
+    def _evaluate_for_range_query_type(self, document):
+        for field, comparisons in self.condition.items():
+            doc_val = document['_source']
+            for k in field.split("."):
+                if hasattr(doc_val, k):
+                    doc_val = getattr(doc_val, k)
+                elif k in doc_val:
+                    doc_val = doc_val[k]
+                else:
+                    return False
+
+            if isinstance(doc_val, list):
+                return False
+
+            for sign, value in comparisons.items():
+                if isinstance(doc_val, datetime.datetime):
+                    value = dateutil.parser.isoparse(value)
+                if sign == 'gte':
+                    if doc_val < value:
+                        return False
+                elif sign == 'gt':
+                    if doc_val <= value:
+                        return False
+                elif sign == 'lte':
+                    if doc_val > value:
+                        return False
+                elif sign == 'lt':
+                    if doc_val >= value:
+                        return False
+                else:
+                    raise ValueError(f"Invalid comparison type {sign}")
+            return True
+
     def _evaluate_for_compound_query_type(self, document):
         return_val = False
         if isinstance(self.condition, dict):
@@ -116,33 +211,50 @@ class FakeQueryCondition:
 
         return return_val
 
-    def _compare_value_for_field(self, doc_source, field, value, ignore_case):
-        value = str(value).lower() if ignore_case and isinstance(value, str) \
-            else value
-        doc_val = None
-        if hasattr(doc_source, field):
-            doc_val = getattr(doc_source, field)
-        elif field in doc_source:
-            doc_val = doc_source[field]
+    def _evaluate_for_should_query_type(self, document):
+        return_val = False
+        for sub_condition in self.condition:
+            for sub_condition_key in sub_condition:
+                return_val = FakeQueryCondition(
+                    QueryType.get_query_type(sub_condition_key),
+                    sub_condition[sub_condition_key]
+                ).evaluate(document)
+                if return_val:
+                    return True
+        return return_val
 
-        if isinstance(doc_val, list):
-            for val in doc_val:
-                val = val if isinstance(val, (int, float, complex)) \
-                    else str(val)
-                if ignore_case and isinstance(val, str):
+    def _evaluate_for_multi_match_query_type(self, document):
+        return self._evaluate_for_fields(document)
+
+    def _compare_value_for_field(self, doc_source, field, value, ignore_case):
+        if ignore_case and isinstance(value, str):
+            value = value.lower()
+
+        doc_val = doc_source
+        # Remove boosting
+        field, *_ = field.split("*")
+        for k in field.split("."):
+            if hasattr(doc_val, k):
+                doc_val = getattr(doc_val, k)
+                break
+            elif k in doc_val:
+                doc_val = doc_val[k]
+                break
+            else:
+                return False
+
+        if not isinstance(doc_val, list):
+            doc_val = [doc_val]
+
+        for val in doc_val:
+            if not isinstance(val, (int, float, complex)) or val is None:
+                val = str(val)
+                if ignore_case:
                     val = val.lower()
-                if isinstance(val, str) and value in val:
-                    return True
-                if value == val:
-                    return True
-        else:
-            doc_val = doc_val if isinstance(doc_val, (int, float, complex)) \
-                else str(doc_val)
-            if ignore_case and isinstance(doc_val, str):
-                doc_val = doc_val.lower()
-            if isinstance(doc_val, str) and value in doc_val:
+
+            if value == val:
                 return True
-            if value == doc_val:
+            if isinstance(val, str) and str(value) in val:
                 return True
 
         return False
@@ -155,6 +267,7 @@ class FakeElasticsearch(Elasticsearch):
     def __init__(self, hosts=None, transport_class=None, **kwargs):
         self.__documents_dict = {}
         self.__scrolls = {}
+        self.transport = Transport(_normalize_hosts(hosts), **kwargs)
 
     @property
     def indices(self):
@@ -204,10 +317,10 @@ class FakeElasticsearch(Elasticsearch):
 
         if id is None:
             id = get_random_id()
-        elif self.exists(index, doc_type, id, params=params):
-            doc = self.get(index, id, doc_type, params=params)
+        elif self.exists(index, id, doc_type=doc_type, params=params):
+            doc = self.get(index, id, doc_type=doc_type, params=params)
             version = doc['_version'] + 1
-            self.delete(index, doc_type, id)
+            self.delete(index, id, doc_type=doc_type)
 
         self.__documents_dict[index].append({
             '_type': doc_type,
@@ -227,47 +340,105 @@ class FakeElasticsearch(Elasticsearch):
 
     @query_params('consistency', 'op_type', 'parent', 'refresh', 'replication',
                   'routing', 'timeout', 'timestamp', 'ttl', 'version', 'version_type')
-    def bulk(self,  body, index=None, doc_type=None, params=None, headers=None):
-        version = 1
+    def bulk(self, body, index=None, doc_type=None, params=None, headers=None):
         items = []
+        errors = False
 
-        for line in body.splitlines():
-            if len(line.strip()) > 0:
-                line = json.loads(line)
+        for raw_line in body.splitlines():
+            if len(raw_line.strip()) > 0:
+                line = json.loads(raw_line)
 
-                if 'index' in line:
-                    index = line['index']['_index']
-                    doc_type = line['index']['_type']
+                if any(action in line for action in ['index', 'create', 'update', 'delete']):
+                    action = next(iter(line.keys()))
+
+                    version = 1
+                    index = line[action].get('_index') or index
+                    doc_type = line[action].get('_type', "_doc")  # _type is deprecated in 7.x
+
+                    if action in ['delete', 'update'] and not line[action].get("_id"):
+                        raise RequestError(400, 'action_request_validation_exception', 'missing id')
+
+                    document_id = line[action].get('_id', get_random_id())
+
+                    if action == 'delete':
+                        status, result, error = self._validate_action(
+                            action, index, document_id, doc_type, params=params
+                        )
+                        item = {action: {
+                            '_type': doc_type,
+                            '_id': document_id,
+                            '_index': index,
+                            '_version': version,
+                            'status': status,
+                        }}
+                        if error:
+                            errors = True
+                            item[action]["error"] = result
+                        else:
+                            self.delete(index, document_id, doc_type=doc_type, params=params)
+                            item[action]["result"] = result
+                        items.append(item)
 
                     if index not in self.__documents_dict:
                         self.__documents_dict[index] = list()
                 else:
-                    document_id = get_random_id()
+                    if 'doc' in line and action == 'update':
+                        source = line['doc']
+                    else:
+                        source = line
+                    status, result, error = self._validate_action(
+                        action, index, document_id, doc_type, params=params
+                    )
+                    item = {
+                        action: {
+                            '_type': doc_type,
+                            '_id': document_id,
+                            '_index': index,
+                            '_version': version,
+                            'status': status,
+                        }
+                    }
+                    if not error:
+                        item[action]["result"] = result
+                        if self.exists(index, document_id, doc_type=doc_type, params=params):
+                            doc = self.get(index, document_id, doc_type=doc_type, params=params)
+                            version = doc['_version'] + 1
+                            self.delete(index, document_id, doc_type=doc_type, params=params)
 
-                    self.__documents_dict[index].append({
-                        '_type': doc_type,
-                        '_id': document_id,
-                        '_source': line,
-                        '_index': index,
-                        '_version': version
-                    })
-
-                    items.append({'index': {
-                        '_type': doc_type,
-                        '_id': document_id,
-                        '_index': index,
-                        '_version': version,
-                        'result': 'created',
-                        'status': 201
-                    }})
-
+                        self.__documents_dict[index].append({
+                            '_type': doc_type,
+                            '_id': document_id,
+                            '_source': source,
+                            '_index': index,
+                            '_version': version
+                        })
+                    else:
+                        errors = True
+                        item[action]["error"] = result
+                    items.append(item)
         return {
-            'errors': False,
+            'errors': errors,
             'items': items
         }
 
+    def _validate_action(self, action, index, document_id, doc_type, params=None):
+        if action in ['index', 'update'] and self.exists(index, id=document_id, doc_type=doc_type, params=params):
+            return 200, 'updated', False
+        if action == 'create' and self.exists(index, id=document_id, doc_type=doc_type, params=params):
+            return 409, 'version_conflict_engine_exception', True
+        elif action in ['index', 'create'] and not self.exists(index, id=document_id, doc_type=doc_type, params=params):
+            return 201, 'created', False
+        elif action == "delete" and self.exists(index, id=document_id, doc_type=doc_type, params=params):
+            return 200, 'deleted', False
+        elif action == 'update' and not self.exists(index, id=document_id, doc_type=doc_type, params=params):
+            return 404, 'document_missing_exception', True
+        elif action == 'delete' and not self.exists(index, id=document_id, doc_type=doc_type, params=params):
+            return 404, 'not_found', True
+        else:
+            raise NotImplementedError(f"{action} behaviour hasn't been implemented")
+
     @query_params('parent', 'preference', 'realtime', 'refresh', 'routing')
-    def exists(self, index, doc_type, id, params=None, headers=None):
+    def exists(self, index, id, doc_type=None, params=None, headers=None):
         result = False
         if index in self.__documents_dict:
             for document in self.__documents_dict[index]:
@@ -280,7 +451,9 @@ class FakeElasticsearch(Elasticsearch):
                   'parent', 'preference', 'realtime', 'refresh', 'routing', 'version',
                   'version_type')
     def get(self, index, id, doc_type='_all', params=None, headers=None):
+        ignore = extract_ignore_as_iterable(params)
         result = None
+
         if index in self.__documents_dict:
             for document in self.__documents_dict[index]:
                 if document.get('_id') == id:
@@ -294,6 +467,9 @@ class FakeElasticsearch(Elasticsearch):
 
         if result:
             result['found'] = True
+            return result
+        elif params and 404 in ignore:
+            return {'found': False}
         else:
             error_data = {
                 '_index': index,
@@ -303,7 +479,25 @@ class FakeElasticsearch(Elasticsearch):
             }
             raise NotFoundError(404, json.dumps(error_data))
 
-        return result
+    @query_params('_source', '_source_exclude', '_source_include',
+                  'preference', 'realtime', 'refresh', 'routing',
+                  'stored_fields')
+    def mget(self, body, index, doc_type='_all', params=None, headers=None):
+        ids = body.get('ids')
+        results = []
+        for id in ids:
+            try:
+                results.append(self.get(index, id, doc_type=doc_type,
+                    params=params, headers=headers))
+            except:
+                pass
+        if not results:
+            raise RequestError(
+                400,
+                'action_request_validation_exception',
+                'Validation Failed: 1: no documents to get;'
+            )
+        return {'docs': results}
 
     @query_params('_source', '_source_exclude', '_source_include', 'parent',
                   'preference', 'realtime', 'refresh', 'routing', 'version',
@@ -326,13 +520,14 @@ class FakeElasticsearch(Elasticsearch):
         i = 0
         for searchable_index in searchable_indexes:
             for document in self.__documents_dict[searchable_index]:
-                if doc_type is not None and document.get('_type') != doc_type:
+                if doc_type and document.get('_type') != doc_type:
                     continue
                 i += 1
         result = {
             'count': i,
             '_shards': {
                 'successful': 1,
+                'skipped': 0,
                 'failed': 0,
                 'total': 1
             }
@@ -342,6 +537,38 @@ class FakeElasticsearch(Elasticsearch):
 
     def _get_fake_query_condition(self, query_type_str, condition):
         return FakeQueryCondition(QueryType.get_query_type(query_type_str), condition)
+
+    @query_params(
+        "ccs_minimize_roundtrips",
+        "max_concurrent_searches",
+        "max_concurrent_shard_requests",
+        "pre_filter_shard_size",
+        "rest_total_hits_as_int",
+        "search_type",
+        "typed_keys",
+    )
+    def msearch(self, body, index=None, doc_type=None, params=None, headers=None):
+        def grouped(iterable):
+            if len(iterable) % 2 != 0:
+                raise Exception('Malformed body')
+            iterator = iter(iterable)
+            while True:
+                try:
+                    yield (next(iterator)['index'], next(iterator))
+                except StopIteration:
+                    break
+
+        responses = []
+        took = 0
+        for ind, query in grouped(body):
+            response = self.search(index=ind, body=query)
+            took += response['took']
+            responses.append(response)
+        result = {
+            'took': took,
+            'responses': responses
+        }
+        return result
 
     @query_params('_source', '_source_exclude', '_source_include',
                   'allow_no_indices', 'analyze_wildcard', 'analyzer', 'default_operator',
@@ -362,7 +589,9 @@ class FakeElasticsearch(Elasticsearch):
             for query_type_str, condition in query.items():
                 conditions.append(self._get_fake_query_condition(query_type_str, condition))
         for searchable_index in searchable_indexes:
+
             for document in self.__documents_dict[searchable_index]:
+
                 if doc_type:
                     if isinstance(doc_type, list) and document.get('_type') not in doc_type:
                         continue
@@ -376,14 +605,18 @@ class FakeElasticsearch(Elasticsearch):
                 else:
                     matches.append(document)
 
+        for match in matches:
+            self._find_and_convert_data_types(match['_source'])
+
         result = {
             'hits': {
-                'total': len(matches),
+                'total': {'value': len(matches), 'relation': 'eq'},
                 'max_score': 1.0
             },
             '_shards': {
                 # Simulate indexes with 1 shard each
                 'successful': len(searchable_indexes),
+                'skipped': 0,
                 'failed': 0,
                 'total': len(searchable_indexes)
             },
@@ -404,7 +637,7 @@ class FakeElasticsearch(Elasticsearch):
                 aggregations[aggregation] = {
                     "doc_count_error_upper_bound": 0,
                     "sum_other_doc_count": 0,
-                    "buckets": []
+                    "buckets": self.make_aggregation_buckets(definition, matches)
                 }
 
             if aggregations:
@@ -412,7 +645,7 @@ class FakeElasticsearch(Elasticsearch):
 
         if 'scroll' in params:
             result['_scroll_id'] = str(get_random_scroll_id())
-            params['size'] = int(params.get('size') if 'size' in params else 10)
+            params['size'] = int(params.get('size', 10))
             params['from'] = int(params.get('from') + params.get('size') if 'from' in params else 0)
             self.__scrolls[result.get('_scroll_id')] = {
                 'index': index,
@@ -421,6 +654,8 @@ class FakeElasticsearch(Elasticsearch):
                 'params': params
             }
             hits = hits[params.get('from'):params.get('from') + params.get('size')]
+        elif 'size' in params:
+            hits = hits[:int(params['size'])]
 
         result['hits']['hits'] = hits
 
@@ -442,15 +677,17 @@ class FakeElasticsearch(Elasticsearch):
     def delete(self, index, id, doc_type=None, params=None, headers=None):
 
         found = False
-        doc_type = doc_type
+        ignore = extract_ignore_as_iterable(params)
 
         if index in self.__documents_dict:
             for document in self.__documents_dict[index]:
                 if document.get('_id') == id:
                     found = True
-                    doc_type = document.get('_type')
-                    self.__documents_dict[index].remove(document)
-                    break
+                    if doc_type and document.get('_type') != doc_type:
+                        found = False
+                    if found:
+                        self.__documents_dict[index].remove(document)
+                        break
 
         result_dict = {
             'found': found,
@@ -462,6 +699,8 @@ class FakeElasticsearch(Elasticsearch):
 
         if found:
             return result_dict
+        elif params and 404 in ignore:
+            return {'found': False}
         else:
             raise NotFoundError(404, json.dumps(result_dict))
 
@@ -509,3 +748,54 @@ class FakeElasticsearch(Elasticsearch):
                 raise NotFoundError(404, 'IndexMissingException[[{0}] missing]'.format(searchable_index))
 
         return searchable_indexes
+
+    @classmethod
+    def _find_and_convert_data_types(cls, document):
+        for key, value in document.items():
+            if isinstance(value, dict):
+                cls._find_and_convert_data_types(value)
+            elif isinstance(value, datetime.datetime):
+                document[key] = value.isoformat()
+
+    def make_aggregation_buckets(self, aggregation, documents):
+        if 'composite' in aggregation:
+            return self.make_composite_aggregation_buckets(aggregation, documents)
+        return []
+
+    def make_composite_aggregation_buckets(self, aggregation, documents):
+
+        def make_key(doc_source, agg_source):
+            attr = list(agg_source.values())[0]["terms"]["field"]
+            return doc_source[attr]
+
+        def make_bucket(bucket_key, bucket):
+            out = {
+                "key": {k: v for k, v in zip(bucket_key_fields, bucket_key)},
+                "doc_count": len(bucket),
+            }
+
+            for metric_key, metric_definition in aggregation["aggs"].items():
+                metric_type_str = list(metric_definition)[0]
+                metric_type = MetricType.get_metric_type(metric_type_str)
+                attr = metric_definition[metric_type_str]["field"]
+                data = [doc[attr] for doc in bucket]
+
+                if metric_type == MetricType.CARDINALITY:
+                    value = len(set(data))
+                else:
+                    raise NotImplementedError(f"Metric type '{metric_type}' not implemented")
+
+                out[metric_key] = {"value": value}
+            return out
+
+        agg_sources = aggregation["composite"]["sources"]
+        buckets = defaultdict(list)
+        bucket_key_fields = [list(src)[0] for src in agg_sources]
+        for document in documents:
+            doc_src = document["_source"]
+            key = tuple(make_key(doc_src, agg_src) for agg_src in aggregation["composite"]["sources"])
+            buckets[key].append(doc_src)
+
+        buckets = sorted(((k, v) for k, v in buckets.items()), key=lambda x: x[0])
+        buckets = [make_bucket(bucket_key, bucket) for bucket_key, bucket in buckets]
+        return buckets

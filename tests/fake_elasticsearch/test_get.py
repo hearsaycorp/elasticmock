@@ -11,6 +11,14 @@ class TestGet(TestElasticmock):
         with self.assertRaises(NotFoundError):
             self.es.get(index=INDEX_NAME, id='1')
 
+    def test_should_not_raise_notfounderror_when_nonindexed_id_is_used_and_ignored(self):
+        target_doc = self.es.get(index=INDEX_NAME, id='1', ignore=404)
+        self.assertFalse(target_doc.get('found'))
+
+    def test_should_not_raise_notfounderror_when_nonindexed_id_is_used_and_ignored_list(self):
+        target_doc = self.es.get(index=INDEX_NAME, id='1', ignore=(401, 404))
+        self.assertFalse(target_doc.get('found'))
+
     def test_should_get_document_with_id(self):
         data = self.es.index(index=INDEX_NAME, doc_type=DOC_TYPE, body=BODY)
 
@@ -52,3 +60,11 @@ class TestGet(TestElasticmock):
         target_doc_source = self.es.get_source(index=INDEX_NAME, doc_type=DOC_TYPE, id=document_id)
 
         self.assertEqual(target_doc_source, BODY)
+
+    def test_mget_get_several_documents_by_id(self):
+        ids = []
+        for _ in range(0, 10):
+            data = self.es.index(index=INDEX_NAME, doc_type=DOC_TYPE, body=BODY)
+            ids.append(data.get('_id'))
+        results = self.es.mget(index=INDEX_NAME, body={'ids': ids})
+        self.assertEqual(len(results['docs']), 10)

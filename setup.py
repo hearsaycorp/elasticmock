@@ -2,12 +2,12 @@
 
 import setuptools
 
-__version__ = '2.1'
+__version__ = '1.8.0'
 
 # read the contents of your readme file
 from os import path
 this_directory = path.abspath(path.dirname(__file__))
-with open(path.join(this_directory, 'README.md'), 'r') as f:
+with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
     long_description = f.read()
 
 setuptools.setup(
@@ -22,15 +22,14 @@ setuptools.setup(
     packages=setuptools.find_packages(exclude=('tests')),
     install_requires=[
         'elasticsearch',
-        'mock'
+        'mock',
+        'python-dateutil',
     ],
     classifiers=[
         'Environment :: Web Environment',
         'Intended Audience :: Developers',
         'Operating System :: OS Independent',
         'Programming Language :: Python',
-        'Programming Language :: Python :: 2',
-        'Programming Language :: Python :: 2.7',
         'Programming Language :: Python :: 3',
         'Programming Language :: Python :: 3.6',
         'Programming Language :: Python :: 3.7',
