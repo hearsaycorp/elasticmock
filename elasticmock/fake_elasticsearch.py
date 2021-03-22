@@ -15,7 +15,7 @@ from elasticmock.behaviour.server_failure import server_failure
 from elasticmock.fake_cluster import FakeClusterClient
 from elasticmock.fake_indices import FakeIndicesClient
 from elasticmock.utilities import (extract_ignore_as_iterable, get_random_id,
-    get_random_scroll_id)
+                                   get_random_scroll_id)
 from elasticmock.utilities.decorator import for_all_methods
 
 PY3 = sys.version_info[0] == 3
@@ -35,6 +35,9 @@ class QueryType:
     SHOULD = 'SHOULD'
     MINIMUM_SHOULD_MATCH = 'MINIMUM_SHOULD_MATCH'
     MULTI_MATCH = 'MULTI_MATCH'
+    MUST_NOT = 'MUST_NOT'
+    EXISTS = 'EXISTS'
+    FIELD = 'FIELD'
 
     @staticmethod
     def get_query_type(type_str):
@@ -60,6 +63,12 @@ class QueryType:
             return QueryType.MINIMUM_SHOULD_MATCH
         elif type_str == 'multi_match':
             return QueryType.MULTI_MATCH
+        elif type_str == 'must_not':
+            return QueryType.MUST_NOT
+        elif type_str == 'exists':
+            return QueryType.EXISTS
+        elif type_str == 'field':
+            return QueryType.FIELD
         else:
             raise NotImplementedError(f'type {type_str} is not implemented for QueryType')
 
@@ -107,8 +116,26 @@ class FakeQueryCondition:
             return self._evaluate_for_should_query_type(document)
         elif self.type == QueryType.MULTI_MATCH:
             return self._evaluate_for_multi_match_query_type(document)
+        elif self.type == QueryType.MUST_NOT:
+            return self._evaluate_for_must_not_query_type(document)
+        elif self.type == QueryType.EXISTS:
+            return self._evaluate_for_exists_query_type(document)
+        elif self.type == QueryType.FIELD:
+            return self._evaluate_for_compound_query_type(document)
+        elif self.type == QueryType.MINIMUM_SHOULD_MATCH:
+            return True
         else:
             raise NotImplementedError('Fake query evaluation not implemented for query type: %s' % self.type)
+
+    def _evaluate_for_must_not_query_type(self, document):
+        return not self._evaluate_for_compound_query_type(document)
+
+    def _evaluate_for_exists_query_type(self, document):
+        doc_source = document['_source']
+        return_val = False
+        for field, value in self.condition.items():
+            return_val = value in doc_source.keys() and doc_source[value] is not None
+        return return_val
 
     def _evaluate_for_match_query_type(self, document):
         return self._evaluate_for_field(document, True)
@@ -169,6 +196,9 @@ class FakeQueryCondition:
 
             if isinstance(doc_val, list):
                 return False
+
+            if doc_val != 0 and not doc_val:
+                return True
 
             for sign, value in comparisons.items():
                 if isinstance(doc_val, datetime.datetime):
@@ -488,7 +518,7 @@ class FakeElasticsearch(Elasticsearch):
         for id in ids:
             try:
                 results.append(self.get(index, id, doc_type=doc_type,
-                    params=params, headers=headers))
+                                        params=params, headers=headers))
             except:
                 pass
         if not results:
@@ -517,20 +547,11 @@ class FakeElasticsearch(Elasticsearch):
     def count(self, index=None, doc_type=None, body=None, params=None, headers=None):
         searchable_indexes = self._normalize_index_to_list(index)
 
-        i = 0
-        for searchable_index in searchable_indexes:
-            for document in self.__documents_dict[searchable_index]:
-                if doc_type and document.get('_type') != doc_type:
-                    continue
-                i += 1
+        contents = self.search(index=index, doc_type=doc_type, body=body, params=params, headers=headers)
+
         result = {
-            'count': i,
-            '_shards': {
-                'successful': 1,
-                'skipped': 0,
-                'failed': 0,
-                'total': 1
-            }
+            'count': contents['hits']['hits'].__len__(),
+            '_shards': contents['_shards']
         }
 
         return result
@@ -642,6 +663,14 @@ class FakeElasticsearch(Elasticsearch):
 
             if aggregations:
                 result['aggregations'] = aggregations
+
+        if body is not None and 'sort' in body:
+            for key, value in body['sort'][0].items():
+                if body['sort'][0][key]['order'] == 'desc':
+                    hits = sorted(hits, key=lambda k: k['_source'][key], reverse=True)
+                else:
+                    hits = sorted(hits, key=lambda k: k['_source'][key])
+
 
         if 'scroll' in params:
             result['_scroll_id'] = str(get_random_scroll_id())
@@ -774,18 +803,19 @@ class FakeElasticsearch(Elasticsearch):
                 "doc_count": len(bucket),
             }
 
-            for metric_key, metric_definition in aggregation["aggs"].items():
-                metric_type_str = list(metric_definition)[0]
-                metric_type = MetricType.get_metric_type(metric_type_str)
-                attr = metric_definition[metric_type_str]["field"]
-                data = [doc[attr] for doc in bucket]
+            if "aggs" in aggregation.keys():
+                for metric_key, metric_definition in aggregation["aggs"].items():
+                    metric_type_str = list(metric_definition)[0]
+                    metric_type = MetricType.get_metric_type(metric_type_str)
+                    attr = metric_definition[metric_type_str]["field"]
+                    data = [doc[attr] for doc in bucket]
 
-                if metric_type == MetricType.CARDINALITY:
-                    value = len(set(data))
-                else:
-                    raise NotImplementedError(f"Metric type '{metric_type}' not implemented")
+                    if metric_type == MetricType.CARDINALITY:
+                        value = len(set(data))
+                    else:
+                        raise NotImplementedError(f"Metric type '{metric_type}' not implemented")
 
-                out[metric_key] = {"value": value}
+                    out[metric_key] = {"value": value}
             return out
 
         agg_sources = aggregation["composite"]["sources"]
@@ -793,7 +823,13 @@ class FakeElasticsearch(Elasticsearch):
         bucket_key_fields = [list(src)[0] for src in agg_sources]
         for document in documents:
             doc_src = document["_source"]
-            key = tuple(make_key(doc_src, agg_src) for agg_src in aggregation["composite"]["sources"])
+            key = ()
+            for agg_src in aggregation["composite"]["sources"]:
+                k=make_key(doc_src, agg_src)
+                if isinstance(k, list):
+                    key += tuple(k)
+                else:
+                    key += tuple([k])
             buckets[key].append(doc_src)
 
         buckets = sorted(((k, v) for k, v in buckets.items()), key=lambda x: x[0])

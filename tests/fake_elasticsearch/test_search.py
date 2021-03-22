@@ -210,6 +210,25 @@ class TestSearch(TestElasticmock):
         self.assertEqual(len(hits), 3)
         self.assertEqual(hits[0]['_source'], {'data': 'test_0'})
 
+    def test_search_bool_must_not_match_query(self):
+        for i in range(0, 10):
+            self.es.index(index='index_for_search', doc_type=DOC_TYPE, body={'data': 'test_{0}'.format(i)})
+
+        response = self.es.search(index='index_for_search', doc_type=DOC_TYPE,
+                                  body={
+                                      'query': {
+                                          'bool': {
+                                              'must_not': [
+                                                  {'match': {'data': 'test_0'}},
+                                              ]
+                                          }
+                                      }
+                                  })
+        self.assertEqual(response['hits']['total']['value'], 9)
+        hits = response['hits']['hits']
+        self.assertEqual(len(hits), 9)
+        self.assertEqual(hits[0]['_source'], {'data': 'test_1'})
+
     def test_msearch(self):
         for i in range(0, 10):
             self.es.index(index='index_for_search1', doc_type=DOC_TYPE, body={
