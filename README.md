@@ -177,6 +177,31 @@ python setup.py test
 
 ## Changelog
 
+#### 1.8.0:
+- [Add multi_match](https://github.com/vrcmarcos/elasticmock/pull/63) (Thanks [@carlosgalvez-tiendeo](https://github.com/carlosgalvez-tiendeo))
+- [Add mget](https://github.com/vrcmarcos/elasticmock/pull/64) (Thanks [@carlosgalvez-tiendeo](https://github.com/carlosgalvez-tiendeo))
+- [Add create, update, and delete to bulk API](https://github.com/vrcmarcos/elasticmock/pull/65) (Thanks [@fenimore](https://github.com/fenimore))
+- [Add Should to bool Query](https://github.com/vrcmarcos/elasticmock/pull/67) (Thanks [@fenimore](https://github.com/fenimore))
+- [Update Search API return result](https://github.com/vrcmarcos/elasticmock/pull/68) (Thanks [@fenimore](https://github.com/fenimore))
+
+#### 1.7.0:
+- [Add shards skipped to search and count](https://github.com/vrcmarcos/elasticmock/pull/56) (Thanks [@philtweir](https://github.com/philtweir))
+- [Allow 'match_all' queries in FakeSearch](https://github.com/vrcmarcos/elasticmock/pull/54) (Thanks [@jankislinger](https://github.com/jankislinger))
+- [Query using nested attributes](https://github.com/vrcmarcos/elasticmock/pull/55) (Thanks [@jankislinger](https://github.com/jankislinger))
+- [New features: range, size, aggregations](https://github.com/vrcmarcos/elasticmock/pull/57) (Thanks [@jankislinger](https://github.com/jankislinger))
+- [Adding "should" and "minimum_should_match" to QueryType](https://github.com/vrcmarcos/elasticmock/pull/62) (Thanks [@lunarie16](https://github.com/lunarie16))
+
+#### 1.6.2:
+- [Add must to query type](https://github.com/vrcmarcos/elasticmock/pull/47) (Thanks [@cuent](https://github.com/cuent))
+- [Add match all query type](https://github.com/vrcmarcos/elasticmock/pull/48) (Thanks [@cuent](https://github.com/cuent))
+
+#### 1.6.1:
+- Fix Twine README.md
+
+#### 1.6.0:
+- [Implements several basic search types](https://github.com/vrcmarcos/elasticmock/pull/42) (Thanks [@KyKoPho](https://github.com/KyKoPho))
+- [Allow ignoring of missing documents (404) for get and delete](https://github.com/vrcmarcos/elasticmock/pull/44) (Thanks [@joosterman](https://github.com/joosterman))
+
 #### 1.5.1:
 - [Fix tests for es > 7](https://github.com/vrcmarcos/elasticmock/pull/38) (Thanks [@chesstrian](https://github.com/chesstrian))
 

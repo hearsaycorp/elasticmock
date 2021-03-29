@@ -1,4 +1,4 @@
-ELASTICMOCK_VERSION='2.0'
+ELASTICMOCK_VERSION='2.2.0'
 
 install:
 	pip install -r requirements.txt
@@ -14,7 +14,11 @@ upload: create_dist
 	twine upload dist/*
 	git push
 
-create_dist: create_dist_commit update_pip
+create_dist: create_dist_no_commit update_pip
+	rm -rf dist
+	python3 setup.py sdist
+
+create_dist_no_commit: update_pip
 	rm -rf dist
 	python3 setup.py sdist
 
