@@ -671,7 +671,7 @@ class FakeElasticsearch(Elasticsearch):
                 else:
                     hits = sorted(hits, key=lambda k: k['_source'][key])
 
-        if 'from' in body and 'size' in body and body['from'] + body['size'] > 0:
+        if body is not None and 'from' in body and 'size' in body and body['from'] + body['size'] > 0:
             hits = hits[body['from']:body['from'] + body['size']]
 
         if 'scroll' in params:
