@@ -9,6 +9,9 @@ test_install: install
 test: test_install
 	python3 setup.py test
 
+test-ci:
+	tox
+
 upload: create_dist
 	pip install twine
 	twine upload dist/*
